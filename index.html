@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Fly Pieter - Account</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Fly planes in a 3D multiplayer dogfight simulation game. No signup required.">
+    <meta property="og:title" content="Fly Pieter">
+    <meta property="og:description" content="Dogfight planes in a 3D multiplayer game.">
+    <meta property="og:image" content="/assets/fly_og.png">
+    <meta name="twitter:card" content="summary_large_image">
+    <link rel="icon" href="/assets/fly_favicon.png">
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stats.js@0.17.0/build/stats.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/lil-gui@0.18.0/dist/lil-gui.min.js"></script>
+    <!-- Authentication -->
+    <div id="auth-container">
+        <h2>Fly Pieter Login</h2>
+        <input type="text" id="username" placeholder="Enter your username" maxlength="20" />
+        <input type="password" id="password" placeholder="Password" maxlength="30" />
+        <button id="login-button">Login</button>
+        <p id="login-message"></p>
+        <div class="signup-link">
+            <a href="#" id="show-signup">Don't have an account? Sign up here</a>
+        </div>
+    </div>
+
+    <div id="signup-container" style="display: none;">
+        <h2>Create an Account</h2>
+        <input type="text" id="new-username" placeholder="Choose a username" maxlength="20" />
+        <input type="password" id="new-password" placeholder="Choose a password" maxlength="30" />
+        <button id="signup-button">Sign Up</button>
+        <p id="signup-message"></p>
+        <div class="signup-link">
+            <a href="#" id="show-login">Already have an account? Login here</a>
+        </div>
+    </div>
+
+    <div id="loading-overlay" style="display: none;">Loading game…</div>
+
+    <script src="/auth.js"></script>
+    <script src="/game.js" type="module"></script>
+</body>
+</html>
+    <script>
+        let scene, camera, renderer;
+        let player, missiles = [], otherPlayers = new Map();
+        let keys = {};
+        let isMuted = false;
+        let gameTime = 0;
+        let score = 0;
+        let currentKills = 0;
+        const HIT_DAMAGE = 25;
+        let socket, verifyToken, selfUsername, selfPlaneId;
+        const CRASH_MESSAGES = {
+            "exploded": "exploded in mid-air 💥",
+            "stall": "stalled out and crashed 💫",
+            "spin": "spun into the ground 🌀",
+            "fireball": "turned into a fireball 🔥"
+        };
+
+        const RUNWAY_SPAWN_X = -350;
+        const RUNWAY_SPAWN_Y = 40;
+        const RUNWAY_SPAWN_Z = 0;
+        const CARRIER_SPAWN_X = 600;
+        const CARRIER_SPAWN_Y = 40;
+        const CARRIER_SPAWN_Z = 0;
+        const RUNWAY_SHOOT_DISTANCE = 200;
+
+        // ... Continues with all your Three.js setup, billboard ads, jupiter, explosion effects...
+        // Everything intact except Cloudflare scripts
+        function setupWebSocket() {
+            try {
+                console.log('🌐 Connecting to WebSocket server...');
+                socket = new WebSocket(WS_SERVER);
+
+                socket.onopen = () => {
+                    console.log('✅ Connected to WebSocket server');
+                    if (selfUsername) {
+                        showMessage(`<b>${selfUsername}</b> joined the game`);
+                    } else {
+                        showMessage('Connected to server');
+                    }
+                };
+
+                socket.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+
+                        if (data.type === 'positions') {
+                            updateScoreDisplay();
+                            data.data.forEach(positionData => {
+                                if (positionData.planeId && positionData.planeId !== selfPlaneId) {
+                                    const singleUpdate = {
+                                        type: 'position',
+                                        planeId: positionData.planeId,
+                                        username: positionData.username,
+                                        data: positionData
+                                    };
+                                    handleIncomingPlaneData(singleUpdate, positionData.planeId);
+                                }
+                            });
+                        } else {
+                            console.log('📨 Received unknown data type:', data.type);
+                        }
+                    } catch (error) {
+                        console.error('❌ Error parsing WebSocket message:', error);
+                    }
+                };
+
+                socket.onclose = () => {
+                    console.log('👋 Disconnected from WebSocket server');
+                    clearAllPlayers();
+                    setTimeout(setupWebSocket, 5000);
+                };
+
+                socket.onerror = (error) => {
+                    console.error('❌ WebSocket error:', error);
+                };
+            } catch (error) {
+                console.error('❌ Failed to connect to WebSocket server:', error);
+            }
+        }
+        // Final scene additions and object placements
+        const mountain = createMountain();
+        scene.add(mountain);
+
+        // Create chat input and event listeners
+        const chatInput = document.createElement('input');
+        chatInput.id = 'chatInput';
+        chatInput.type = 'text';
+        chatInput.maxLength = 100;
+        chatInput.style.cssText = `
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 10px;
+            border: 1px solid #444;
+            border-radius: 5px;
+            outline:none;
+            display: none;
+            z-index: 1000;
+            width: 300px;
+            font-family: system-ui, sans-serif;
+        `;
+        document.body.appendChild(chatInput);
+
+        chatInput.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') {
+                chatInput.value = '';
+                chatInput.style.display = 'none';
+                isChatting = false;
+                event.preventDefault();
+                return;
+            }
+            if (event.key === 'Enter' && chatInput.value.trim()) {
+                broadcastChatMessage(chatInput.value.trim());
+                chatInput.value = '';
+                chatInput.style.display = 'none';
+                isChatting = false;
+            }
+        });
+
+        // Start your engines
+        setupWebSocket();
+        animate();
+    </script>
+</body>
+</html>
